@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test:rls": "node scripts/test-rls.js",
     "test:phase2": "node scripts/test-phase2.js",
-    "test:verifier": "node scripts/test-verifier.js"
+    "test:verifier": "node scripts/test-verifier.js",
+    "test:phase4": "node scripts/test-phase4.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

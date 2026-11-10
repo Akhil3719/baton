@@ -16,6 +16,8 @@ export interface VerifiedClaim extends Omit<ExtractedClaim, "evidence"> {
   original_status: ClaimStatus;
   status: ClaimStatus;
   audit_note?: string;
+  version?: number;
+  review_state?: string;
 }
 
 /**

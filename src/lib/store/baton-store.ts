@@ -5,14 +5,17 @@ import { Project, Membership, Source, Passage, AuditLog } from "@/types/database
 import { parseSourceText } from "@/lib/pipeline/chunker";
 import { VerifiedClaim, verifyClaimEvidence } from "@/lib/pipeline/integrity";
 import { CACHED_SAMPLE_CLAIMS } from "@/lib/demo/cached-run";
+import { ConflictGroup, GapItem } from "@/types/gaps";
+import { detectRuleBasedGaps, detectConflictGroups } from "@/lib/pipeline/conflict-detector";
 
-// In-memory persistent singleton for development / zero-setup demo
 class BatonStore {
   private projects: Map<string, Project> = new Map();
   private memberships: Map<string, Membership[]> = new Map();
   private sources: Map<string, Source> = new Map();
-  private passages: Map<string, Passage[]> = new Map(); // sourceId -> passages
-  private claims: Map<string, VerifiedClaim> = new Map(); // claimId -> VerifiedClaim
+  private passages: Map<string, Passage[]> = new Map();
+  private claims: Map<string, VerifiedClaim> = new Map();
+  private gaps: Map<string, GapItem> = new Map();
+  private conflictGroups: ConflictGroup[] = [];
   private auditLogs: AuditLog[] = [];
   private isSeeded: boolean = false;
   private lastExtractionTime: string | null = null;
@@ -125,20 +128,23 @@ class BatonStore {
     return { source: newSource, passages: passagesList };
   }
 
-  /**
-   * Save verified claims into the store
-   */
   public saveClaims(claimsList: VerifiedClaim[]): void {
     this.claims.clear();
     for (const c of claimsList) {
-      this.claims.set(c.id || `claim-${Math.random().toString(36).substring(2, 8)}`, c);
+      const claimId = c.id || `claim-${Math.random().toString(36).substring(2, 8)}`;
+      this.claims.set(claimId, {
+        ...c,
+        id: claimId,
+        review_state: (c as any).review_state || "pending",
+        version: (c as any).version || 1,
+      });
     }
     this.lastExtractionTime = new Date().toISOString();
+
+    // Re-run gap and conflict detectors
+    this.refreshGapsAndConflicts();
   }
 
-  /**
-   * Get claims filtered by role and optional kind/status filters
-   */
   public getClaimsForRole(
     role: Role,
     kindFilter?: string,
@@ -147,23 +153,151 @@ class BatonStore {
     const all = Array.from(this.claims.values());
 
     return all.filter((c) => {
-      // 1. RLS Tier Filter
-      if (!this.canRoleAccessClaim(role, c.tier)) {
-        return false;
-      }
-
-      // 2. Kind filter
-      if (kindFilter && kindFilter !== "all" && c.kind !== kindFilter) {
-        return false;
-      }
-
-      // 3. Status filter
-      if (statusFilter && statusFilter !== "all" && c.status !== statusFilter) {
-        return false;
-      }
-
+      if (!this.canRoleAccessClaim(role, c.tier)) return false;
+      if (kindFilter && kindFilter !== "all" && c.kind !== kindFilter) return false;
+      if (statusFilter && statusFilter !== "all" && c.status !== statusFilter) return false;
       return true;
     });
+  }
+
+  public updateClaimReview(
+    claimId: string,
+    action: "approve" | "reject" | "edit",
+    actor: string,
+    editedText?: string
+  ): { claim: VerifiedClaim | null; error?: string } {
+    const claim = this.claims.get(claimId);
+    if (!claim) return { claim: null, error: "Claim not found" };
+
+    const previousVersion = (claim as any).version || 1;
+    let newReviewState: ReviewState = "pending";
+
+    if (action === "approve") {
+      newReviewState = "approved";
+    } else if (action === "reject") {
+      newReviewState = "rejected";
+    } else if (action === "edit") {
+      newReviewState = "edited";
+      if (editedText && editedText.trim()) {
+        claim.text = editedText.trim();
+      }
+    }
+
+    const updatedClaim: VerifiedClaim = {
+      ...claim,
+      review_state: newReviewState,
+      version: previousVersion + 1,
+    } as any;
+
+    this.claims.set(claimId, updatedClaim);
+
+    this.addAuditLog(
+      "nexus-tech-club",
+      actor,
+      `CLAIM_${action.toUpperCase()}`,
+      updatedClaim.text.slice(0, 50),
+      { claimId, action, version: updatedClaim.version, newStatus: updatedClaim.status }
+    );
+
+    return { claim: updatedClaim };
+  }
+
+  public refreshGapsAndConflicts() {
+    const sources = this.getAllSourcesList();
+    const passagesMap = this.getPassagesMap();
+    const claims = Array.from(this.claims.values());
+
+    const detectedGaps = detectRuleBasedGaps(sources, passagesMap, claims);
+    this.gaps.clear();
+    for (const g of detectedGaps) {
+      this.gaps.set(g.id, g);
+    }
+
+    this.conflictGroups = detectConflictGroups(claims);
+  }
+
+  public getGaps(): GapItem[] {
+    if (this.gaps.size === 0) {
+      this.refreshGapsAndConflicts();
+    }
+    return Array.from(this.gaps.values());
+  }
+
+  public getConflictGroups(): ConflictGroup[] {
+    if (this.conflictGroups.length === 0) {
+      this.refreshGapsAndConflicts();
+    }
+    return this.conflictGroups;
+  }
+
+  /**
+   * Section 5F: Answer a gap question as reviewer.
+   * Creates a 'leaver_response' source with access level 'leads_only',
+   * attaches as evidence with a 'Stated by leaver' badge,
+   * updates claim to 'inferred' (stays inferred until approved).
+   */
+  public answerGapQuestion(
+    gapId: string,
+    answerText: string,
+    answeredBy: string = "alex.leaver@nexustech.club"
+  ): { gap: GapItem | null; source: Source | null; updatedClaim: VerifiedClaim | null; error?: string } {
+    const gap = this.gaps.get(gapId);
+    if (!gap) return { gap: null, source: null, updatedClaim: null, error: "Gap not found" };
+
+    // 1. Create leaver_response source with access_level: leads_only
+    const sourceTitle = `Leaver Response: ${gap.title}`;
+    const { source, passages } = this.addSource(
+      "nexus-tech-club",
+      sourceTitle,
+      "notes",
+      answerText,
+      "leads_only", // access level leads
+      answeredBy
+    );
+
+    // 2. Update gap record
+    gap.answer = answerText;
+    gap.answered_by = answeredBy;
+    gap.answered_at = new Date().toISOString();
+    this.gaps.set(gapId, gap);
+
+    // 3. Attach as evidence with "Stated by leaver" badge to associated claim
+    let updatedClaim: VerifiedClaim | null = null;
+    if (gap.associated_claim_id && this.claims.has(gap.associated_claim_id)) {
+      const claim = this.claims.get(gap.associated_claim_id)!;
+
+      const leaverEvidence = {
+        source_id: source.id,
+        locator: `Leaver Statement (line 1)`,
+        exact_quote: answerText,
+        verified: true, // verbatim match against created leaver source
+        resolved_source_id: source.id,
+        source_title: sourceTitle,
+        passage_idx: passages[0]?.idx || 1,
+        is_leaver_statement: true, // "Stated by leaver" badge
+      };
+
+      // Claim stays Inferred until approved
+      updatedClaim = {
+        ...claim,
+        status: "inferred", // stays Inferred until approved
+        evidence: [leaverEvidence, ...claim.evidence],
+        gap_details: undefined, // resolved gap note
+        audit_note: `Answered by leaver (${answeredBy}). Marked Inferred pending review approval.`,
+      };
+
+      this.claims.set(claim.id!, updatedClaim);
+    }
+
+    this.addAuditLog(
+      "nexus-tech-club",
+      answeredBy,
+      "LEAVER_QUESTION_ANSWERED",
+      gap.title,
+      { gapId, sourceId: source.id, claimId: gap.associated_claim_id }
+    );
+
+    return { gap, source, updatedClaim };
   }
 
   public getExtractionStatus() {
@@ -174,9 +308,6 @@ class BatonStore {
     };
   }
 
-  /**
-   * Load and verify the pre-cached sample extraction
-   */
   public loadCachedExtraction(projectId: string = "nexus-tech-club"): VerifiedClaim[] {
     const sources = this.getAllSourcesList();
     const passagesMap = this.getPassagesMap();
@@ -226,6 +357,8 @@ class BatonStore {
     this.sources.clear();
     this.passages.clear();
     this.claims.clear();
+    this.gaps.clear();
+    this.conflictGroups = [];
     this.auditLogs = [];
 
     const project: Project = {
@@ -311,7 +444,6 @@ class BatonStore {
       totalPassages += passages.length;
     }
 
-    // Pre-populate with cached verified extraction so app is immediately testable
     this.loadCachedExtraction(projectId);
 
     this.addAuditLog(
