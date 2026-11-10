@@ -1,12 +1,13 @@
 import fs from "fs";
 import path from "path";
-import { Role, AccessLevel, SourceType, ClaimKind, ClaimStatus, ReviewState } from "@/types/handover";
-import { Project, Membership, Source, Passage, AuditLog, ClaimVersion } from "@/types/database";
+import { Role, AccessLevel, SourceType, ClaimKind, ClaimStatus, ReviewState, HandoverStatus } from "@/types/handover";
+import { Project, Membership, Source, Passage, AuditLog, ClaimVersion, Handover, Acknowledgement } from "@/types/database";
 import { parseSourceText } from "@/lib/pipeline/chunker";
 import { VerifiedClaim, verifyClaimEvidence } from "@/lib/pipeline/integrity";
 import { CACHED_SAMPLE_CLAIMS } from "@/lib/demo/cached-run";
 import { ConflictGroup, GapItem } from "@/types/gaps";
 import { detectRuleBasedGaps, detectConflictGroups } from "@/lib/pipeline/conflict-detector";
+import { composeRoleHandoverView, RoleHandoverView } from "@/lib/pipeline/handover-composer";
 
 class BatonStore {
   private projects: Map<string, Project> = new Map();
@@ -14,9 +15,11 @@ class BatonStore {
   private sources: Map<string, Source> = new Map();
   private passages: Map<string, Passage[]> = new Map();
   private claims: Map<string, VerifiedClaim> = new Map();
-  private claimVersions: Map<string, ClaimVersion[]> = new Map(); // claimId -> ClaimVersion[]
+  private claimVersions: Map<string, ClaimVersion[]> = new Map();
   private gaps: Map<string, GapItem> = new Map();
   private conflictGroups: ConflictGroup[] = [];
+  private handovers: Map<string, Handover> = new Map();
+  private acknowledgements: Map<string, Acknowledgement[]> = new Map(); // handoverId -> Acknowledgement[]
   private auditLogs: AuditLog[] = [];
   private isSeeded: boolean = false;
   private lastExtractionTime: string | null = null;
@@ -141,7 +144,6 @@ class BatonStore {
       };
       this.claims.set(claimId, savedClaim);
 
-      // Initialize Version 1 if not exists
       if (!this.claimVersions.has(claimId)) {
         this.claimVersions.set(claimId, [
           {
@@ -177,10 +179,6 @@ class BatonStore {
     });
   }
 
-  /**
-   * Section 5: Review and edit claims with version history.
-   * Rejected claims are excluded from handovers.
-   */
   public updateClaimReview(
     claimId: string,
     action: "approve" | "reject" | "edit",
@@ -220,7 +218,6 @@ class BatonStore {
 
     this.claims.set(claimId, updatedClaim);
 
-    // Create new claim_versions row
     const versionRow: ClaimVersion = {
       id: `ver-${claimId}-${newVersionNum}`,
       claim_id: claimId,
@@ -236,7 +233,6 @@ class BatonStore {
     const existingVersions = this.claimVersions.get(claimId) || [];
     this.claimVersions.set(claimId, [versionRow, ...existingVersions]);
 
-    // Record in audit_log
     this.addAuditLog(
       "nexus-tech-club",
       actor,
@@ -338,7 +334,6 @@ class BatonStore {
 
       this.claims.set(claim.id!, updatedClaim);
 
-      // Record version row
       const versionRow: ClaimVersion = {
         id: `ver-${claim.id}-${newVersionNum}`,
         claim_id: claim.id!,
@@ -364,6 +359,111 @@ class BatonStore {
     );
 
     return { gap, source, updatedClaim };
+  }
+
+  /**
+   * Phase 6: Publish a new handover version (Section 5G).
+   */
+  public publishHandover(
+    publisherEmail: string = "alex.leaver@nexustech.club",
+    targetRole?: Role
+  ): Handover {
+    const existing = Array.from(this.handovers.values());
+    const nextVersion = existing.length + 1;
+    const handoverId = `handover-v${nextVersion}`;
+
+    // Auto-approve claims for demo release if still in pending
+    for (const [id, claim] of Array.from(this.claims.entries())) {
+      if (!claim.review_state || claim.review_state === "pending") {
+        claim.review_state = "approved";
+        this.claims.set(id, claim);
+      }
+    }
+
+    const newHandover: Handover = {
+      id: handoverId,
+      project_id: "nexus-tech-club",
+      version: nextVersion,
+      status: "published",
+      created_by: publisherEmail,
+      published_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    };
+
+    this.handovers.set(handoverId, newHandover);
+
+    this.addAuditLog(
+      "nexus-tech-club",
+      publisherEmail,
+      "HANDOVER_PUBLISHED",
+      `Handover v${nextVersion}.0`,
+      { version: nextVersion, status: "published", targetRole: targetRole || "all" }
+    );
+
+    return newHandover;
+  }
+
+  public getActiveHandover(): Handover {
+    const list = Array.from(this.handovers.values());
+    if (list.length === 0) {
+      return this.publishHandover("alex.leaver@nexustech.club");
+    }
+    return list[list.length - 1];
+  }
+
+  /**
+   * Generates the role-filtered handover view according to Section 5G.
+   */
+  public getHandoverForRole(role: Role): RoleHandoverView {
+    const handover = this.getActiveHandover();
+    const allClaims = Array.from(this.claims.values());
+    const allSources = this.getAllSourcesList();
+
+    const acks = this.acknowledgements.get(handover.id) || [];
+    const ack = acks.find((a) => a.role === role);
+
+    return composeRoleHandoverView(role, allClaims, allSources, {
+      id: handover.id,
+      version: handover.version,
+      status: handover.status,
+      publishedAt: handover.published_at,
+      createdBy: handover.created_by || "Alex Leaver",
+      acknowledgement: ack
+        ? { acknowledged: true, user: ack.user_id, at: ack.at }
+        : undefined,
+    });
+  }
+
+  /**
+   * Records receipt acknowledgement in acknowledgements table.
+   */
+  public acknowledgeHandover(
+    handoverId: string,
+    userId: string,
+    role: Role,
+    notes?: string
+  ): Acknowledgement {
+    const ack: Acknowledgement = {
+      id: `ack-${Date.now()}`,
+      handover_id: handoverId,
+      user_id: userId,
+      role,
+      notes: notes || null,
+      at: new Date().toISOString(),
+    };
+
+    const existing = this.acknowledgements.get(handoverId) || [];
+    this.acknowledgements.set(handoverId, [ack, ...existing]);
+
+    this.addAuditLog(
+      "nexus-tech-club",
+      userId,
+      "HANDOVER_ACKNOWLEDGED",
+      `Handover ${handoverId}`,
+      { role, at: ack.at }
+    );
+
+    return ack;
   }
 
   public getExtractionStatus() {
@@ -426,6 +526,8 @@ class BatonStore {
     this.claimVersions.clear();
     this.gaps.clear();
     this.conflictGroups = [];
+    this.handovers.clear();
+    this.acknowledgements.clear();
     this.auditLogs = [];
 
     const project: Project = {
@@ -512,6 +614,9 @@ class BatonStore {
     }
 
     this.loadCachedExtraction(projectId);
+
+    // Seed default published handover v1.0
+    this.publishHandover("alex.leaver@nexustech.club");
 
     this.addAuditLog(
       projectId,
