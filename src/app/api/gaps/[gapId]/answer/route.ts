@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
+import { AnswerGapInputSchema } from "@/lib/validations/api-schemas";
 
 export async function POST(
   request: NextRequest,
@@ -18,15 +19,28 @@ export async function POST(
 
   try {
     const { gapId } = params;
-    const body = await request.json();
-    const { answer } = body;
-
-    if (!answer || !answer.trim()) {
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
       return NextResponse.json(
-        { error: "Answer text is required" },
+        { error: "Invalid JSON in request body." },
         { status: 400 }
       );
     }
+
+    const parseResult = AnswerGapInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
+      return NextResponse.json(
+        { error: `Validation error: ${errorMsg}`, issues: parseResult.error.issues },
+        { status: 400 }
+      );
+    }
+
+    const { answer } = parseResult.data;
 
     const result = batonStore.answerGapQuestion(
       gapId,

@@ -3,11 +3,12 @@ import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
 import { runGeminiExtraction } from "@/lib/gemini/client";
 import { verifyClaimEvidence } from "@/lib/pipeline/integrity";
+import { ReconstructInputSchema } from "@/lib/validations/api-schemas";
 
 export async function POST(request: NextRequest) {
   const currentUser = await getCurrentUser();
 
-  // Only owner_reviewer can execute reconstruction pipeline
+  // Non-negotiable rule: Only owner_reviewer can execute reconstruction pipeline
   if (currentUser.role !== "owner_reviewer") {
     return NextResponse.json(
       { error: "403 Forbidden: Only Owner / Reviewer can run the knowledge reconstruction pipeline." },
@@ -16,8 +17,25 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json().catch(() => ({}));
-    const { useCache = false } = body;
+    let rawBody = {};
+    try {
+      rawBody = await request.json();
+    } catch {
+      // Body is optional, defaults to {}
+    }
+
+    const parseResult = ReconstructInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
+      return NextResponse.json(
+        { error: `Validation error: ${errorMsg}` },
+        { status: 400 }
+      );
+    }
+
+    const { useCache = false } = parseResult.data;
 
     // Fast-path: "Use cached run" option
     if (useCache) {
@@ -31,6 +49,18 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // Pre-generation permission filtering: Only sources accessible to reviewer
+    const sources = batonStore.getSourcesForRole(currentUser.role);
+    if (sources.length === 0) {
+      return NextResponse.json(
+        {
+          error: "No sources found for this project. Please upload or seed project sources before running reconstruction.",
+          canSeedSample: true,
+        },
+        { status: 400 }
+      );
+    }
+
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
@@ -42,11 +72,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Pre-generation permission filtering: Only sources accessible to reviewer
-    const sources = batonStore.getSourcesForRole(currentUser.role);
     const passagesMap = batonStore.getPassagesMap();
 
-    // 1. Run Gemini extraction with structured JSON
+    // 1. Run Gemini extraction with structured JSON, retries, and backoff
     const rawAiOutput = await runGeminiExtraction(apiKey, sources, passagesMap);
 
     // 2. Deterministic code verification (Trust Rules #1 & #3)

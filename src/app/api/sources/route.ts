@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
-import { SourceType, AccessLevel } from "@/types/handover";
+import { SourceUploadInputSchema } from "@/lib/validations/api-schemas";
+import { ZodError } from "zod";
 
 export async function GET() {
   const currentUser = await getCurrentUser();
@@ -25,32 +26,28 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
-    const { title, type, rawText, accessLevel } = body;
-
-    if (!title || !type || !rawText || !accessLevel) {
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
       return NextResponse.json(
-        { error: "Missing required fields: title, type, rawText, accessLevel" },
+        { error: "Invalid JSON in request body. Please provide a valid JSON payload." },
         { status: 400 }
       );
     }
 
-    const validTypes: SourceType[] = ["github", "notes", "chat"];
-    const validLevels: AccessLevel[] = ["team", "leads_only", "confidential"];
-
-    if (!validTypes.includes(type)) {
+    const parseResult = SourceUploadInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
       return NextResponse.json(
-        { error: `Invalid type. Must be one of: ${validTypes.join(", ")}` },
+        { error: `Validation error: ${errorMsg}`, issues: parseResult.error.issues },
         { status: 400 }
       );
     }
 
-    if (!validLevels.includes(accessLevel)) {
-      return NextResponse.json(
-        { error: `Invalid accessLevel. Must be one of: ${validLevels.join(", ")}` },
-        { status: 400 }
-      );
-    }
+    const { title, type, rawText, accessLevel } = parseResult.data;
 
     const { source, passages } = batonStore.addSource(
       "nexus-tech-club",

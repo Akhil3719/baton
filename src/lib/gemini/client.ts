@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Source, Passage } from "@/types/database";
 import { ExtractionOutput, ExtractionOutputSchema } from "./schemas";
+import { ZodError } from "zod";
 
 /**
  * Builds an injection-proof, delimited prompt for Gemini extraction.
@@ -74,14 +75,85 @@ Now output a valid JSON object matching this schema:
   return prompt;
 }
 
+export interface RetryOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  backoffFactor?: number;
+  timeoutMs?: number;
+}
+
+const DEFAULT_RETRY_OPTIONS: Required<RetryOptions> = {
+  maxRetries: 3,
+  initialDelayMs: 1000,
+  backoffFactor: 2,
+  timeoutMs: 30000,
+};
+
 /**
- * Runs extraction via Gemini API.
+ * Executes an async task with timeout and exponential backoff retry.
+ */
+async function withRetryAndTimeout<T>(
+  task: () => Promise<T>,
+  options: RetryOptions = {}
+): Promise<T> {
+  const opts = { ...DEFAULT_RETRY_OPTIONS, ...options };
+  let lastError: unknown;
+  let delay = opts.initialDelayMs;
+
+  for (let attempt = 1; attempt <= opts.maxRetries; attempt++) {
+    try {
+      // Create timeout promise
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`Operation timed out after ${opts.timeoutMs}ms`));
+        }, opts.timeoutMs);
+        if (typeof timer.unref === "function") {
+          timer.unref();
+        }
+      });
+
+      // Race operation against timeout
+      return await Promise.race([task(), timeoutPromise]);
+    } catch (err: unknown) {
+      lastError = err;
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      // Check if retryable (rate limits, 503, temporary network blips)
+      const isRateLimit = errorMessage.includes("429") || errorMessage.includes("RESOURCE_EXHAUSTED");
+      const isTransient = errorMessage.includes("503") || errorMessage.includes("fetch failed") || errorMessage.includes("ECONNRESET");
+      const isTimeout = errorMessage.includes("timed out");
+
+      const shouldRetry = (isRateLimit || isTransient || isTimeout) && attempt < opts.maxRetries;
+
+      if (!shouldRetry) {
+        throw err;
+      }
+
+      // Exponential backoff with jitter
+      const jitter = Math.random() * 0.3 * delay;
+      const sleepTime = delay + jitter;
+      console.warn(`[Gemini Client] Attempt ${attempt} failed: ${errorMessage}. Retrying in ${Math.round(sleepTime)}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, sleepTime));
+      delay *= opts.backoffFactor;
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Runs extraction via Gemini API with retries, timeout guard, and Zod validation.
  */
 export async function runGeminiExtraction(
   apiKey: string,
   sources: Source[],
-  passagesMap: Map<string, Passage[]>
+  passagesMap: Map<string, Passage[]>,
+  options?: RetryOptions
 ): Promise<ExtractionOutput> {
+  if (!sources || sources.length === 0) {
+    throw new Error("Cannot run extraction on an empty sources list. Please connect or upload project sources first.");
+  }
+
   const modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash";
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
@@ -93,18 +165,31 @@ export async function runGeminiExtraction(
   });
 
   const prompt = buildExtractionPrompt(sources, passagesMap);
-  const result = await model.generateContent(prompt);
-  const responseText = result.response.text();
 
-  try {
-    const rawJson = JSON.parse(responseText);
-    const validated = ExtractionOutputSchema.parse(rawJson);
-    return validated;
-  } catch (err: unknown) {
-    throw new Error(
-      `Gemini returned malformed structured output: ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
-  }
+  return await withRetryAndTimeout(async () => {
+    const result = await model.generateContent(prompt);
+    const responseText = result.response.text();
+
+    if (!responseText || !responseText.trim()) {
+      throw new Error("Gemini returned an empty response. Please retry.");
+    }
+
+    let rawJson: unknown;
+    try {
+      rawJson = JSON.parse(responseText);
+    } catch (parseErr) {
+      throw new Error(`Gemini response is not valid JSON: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+    }
+
+    try {
+      const validated = ExtractionOutputSchema.parse(rawJson);
+      return validated;
+    } catch (zodErr: unknown) {
+      if (zodErr instanceof ZodError) {
+        const issues = zodErr.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+        throw new Error(`Gemini output failed schema validation: ${issues}`);
+      }
+      throw new Error(`Gemini schema validation error: ${zodErr instanceof Error ? zodErr.message : String(zodErr)}`);
+    }
+  }, options);
 }

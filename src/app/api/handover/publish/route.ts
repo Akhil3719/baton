@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
+import { PublishHandoverInputSchema } from "@/lib/validations/api-schemas";
 
 export async function POST(request: NextRequest) {
   const currentUser = await getCurrentUser();
@@ -13,8 +14,25 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json().catch(() => ({}));
-    const { targetRole } = body;
+    let rawBody = {};
+    try {
+      rawBody = await request.json();
+    } catch {
+      // Body is optional
+    }
+
+    const parseResult = PublishHandoverInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
+      return NextResponse.json(
+        { error: `Validation error: ${errorMsg}` },
+        { status: 400 }
+      );
+    }
+
+    const { targetRole } = parseResult.data;
 
     const newHandover = batonStore.publishHandover(currentUser.email, targetRole);
 

@@ -12,7 +12,9 @@
     "test:verifier": "node scripts/test-verifier.js",
     "test:phase4": "node scripts/test-phase4.js",
     "test:phase5": "node scripts/test-phase5.js",
-    "test:phase6": "node scripts/test-phase6.js"
+    "test:phase6": "node scripts/test-phase6.js",
+    "test:permissions": "node scripts/test-permissions.js",
+    "eval": "node scripts/eval.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",

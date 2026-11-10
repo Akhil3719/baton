@@ -1,20 +1,34 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
+import { AcknowledgeHandoverInputSchema } from "@/lib/validations/api-schemas";
 
 export async function POST(request: NextRequest) {
   const currentUser = await getCurrentUser();
 
   try {
-    const body = await request.json();
-    const { handoverId, notes } = body;
-
-    if (!handoverId) {
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
       return NextResponse.json(
-        { error: "handoverId is required" },
+        { error: "Invalid JSON in request body." },
         { status: 400 }
       );
     }
+
+    const parseResult = AcknowledgeHandoverInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
+      return NextResponse.json(
+        { error: `Validation error: ${errorMsg}`, issues: parseResult.error.issues },
+        { status: 400 }
+      );
+    }
+
+    const { handoverId, notes } = parseResult.data;
 
     const ack = batonStore.acknowledgeHandover(
       handoverId,

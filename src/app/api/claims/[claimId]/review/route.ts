@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
 import { batonStore } from "@/lib/store/baton-store";
+import { ReviewActionInputSchema } from "@/lib/validations/api-schemas";
 
 export async function POST(
   request: NextRequest,
@@ -17,15 +18,28 @@ export async function POST(
 
   try {
     const { claimId } = params;
-    const body = await request.json();
-    const { action, editedText } = body;
-
-    if (!["approve", "reject", "edit"].includes(action)) {
+    let rawBody: unknown;
+    try {
+      rawBody = await request.json();
+    } catch {
       return NextResponse.json(
-        { error: "Invalid review action. Must be 'approve', 'reject', or 'edit'." },
+        { error: "Invalid JSON in request body." },
         { status: 400 }
       );
     }
+
+    const parseResult = ReviewActionInputSchema.safeParse(rawBody);
+    if (!parseResult.success) {
+      const errorMsg = parseResult.error.issues
+        .map((i) => `${i.path.join(".") || "field"}: ${i.message}`)
+        .join(", ");
+      return NextResponse.json(
+        { error: `Validation error: ${errorMsg}`, issues: parseResult.error.issues },
+        { status: 400 }
+      );
+    }
+
+    const { action, editedText } = parseResult.data;
 
     const result = batonStore.updateClaimReview(
       claimId,
