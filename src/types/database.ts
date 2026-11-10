@@ -31,6 +31,7 @@ export interface Passage {
   id: string;
   source_id: string;
   idx: number;
+  locator?: string;
   text: string;
   author: string | null;
   timestamp: string | null;
