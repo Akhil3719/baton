@@ -1,0 +1,71 @@
+[
+  {
+    "id": "ISSUE-42",
+    "number": 42,
+    "title": "Configure production release branch and deploy pipeline",
+    "author": "alex.leaver",
+    "created_at": "2026-10-04T10:15:00Z",
+    "status": "closed",
+    "assignee": "alex.leaver",
+    "labels": ["devops", "release"],
+    "body": "Production deployment pipeline has been configured in GitHub Actions. The production environment is configured to deploy exclusively from the release-v2.1 branch upon tag push. Any hotfix must be merged into release-v2.1 before triggering deployment.",
+    "comments": [
+      {
+        "id": "C-42-1",
+        "author": "jamie.dev",
+        "created_at": "2026-10-05T14:20:00Z",
+        "body": "Confirmed that GitHub Actions workflow `.github/workflows/deploy.yml` triggers on push to release-v2.1."
+      }
+    ]
+  },
+  {
+    "id": "ISSUE-57",
+    "number": 57,
+    "title": "Migrate core persistence layer from MongoDB to PostgreSQL",
+    "author": "alex.leaver",
+    "created_at": "2026-10-12T09:30:00Z",
+    "status": "closed",
+    "assignee": "alex.leaver",
+    "labels": ["architecture", "database"],
+    "body": "We decided to migrate the entire database from MongoDB Atlas to PostgreSQL on Supabase. Completed migration script for user records and project documents.",
+    "comments": [
+      {
+        "id": "C-57-1",
+        "author": "morgan.lead",
+        "created_at": "2026-10-13T11:00:00Z",
+        "body": "Migration executed smoothly. Notice: no rationale or benchmark comparison was documented in the architecture decision record for why PostgreSQL was chosen over MongoDB."
+      }
+    ]
+  },
+  {
+    "id": "ISSUE-89",
+    "number": 89,
+    "title": "CRITICAL: Auth token signature verification vulnerability in webhook handler",
+    "author": "priya.security",
+    "created_at": "2026-10-28T16:45:00Z",
+    "status": "open",
+    "assignee": null,
+    "labels": ["security", "p0", "unassigned"],
+    "body": "Security audit flagged that incoming external webhook signatures are not verified against the secret hash when header X-Webhook-Legacy is present. Requires urgent patch before next public release. Currently unassigned.",
+    "comments": []
+  },
+  {
+    "id": "ISSUE-94",
+    "number": 94,
+    "title": "Intermittent timeout failures in Stripe checkout webhooks",
+    "author": "jamie.dev",
+    "created_at": "2026-11-02T13:10:00Z",
+    "status": "open",
+    "assignee": "jamie.dev",
+    "labels": ["bug", "payments"],
+    "body": "Recurring issue: Webhooks from Stripe for subscription renewals time out after 10000ms because there is no automated retry queue and heavy DB lock occurs on the invoices table.",
+    "comments": [
+      {
+        "id": "C-94-1",
+        "author": "alex.leaver",
+        "created_at": "2026-11-03T09:00:00Z",
+        "body": "Temporary workaround was restarting the worker pod manually. A durable BullMQ or PG-boss queue is needed."
+      }
+    ]
+  }
+]
