@@ -28,10 +28,10 @@ CREATE OR REPLACE FUNCTION get_user_role(p_id UUID)
 RETURNS TEXT AS $$
 BEGIN
     RETURN (
-        SELECT role 
+        SELECT memberships.role 
         FROM memberships 
-        WHERE project_id = p_id 
-          AND user_id = auth.uid()
+        WHERE memberships.project_id = p_id 
+          AND memberships.user_id = auth.uid()
         LIMIT 1
     );
 END;
@@ -174,7 +174,7 @@ ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
 -- ----------------------------------------------------------------------------
 CREATE POLICY "Projects readable by members" ON projects
     FOR SELECT USING (
-        id IN (SELECT project_id FROM memberships WHERE user_id = auth.uid())
+        id IN (SELECT memberships.project_id FROM memberships WHERE memberships.user_id = auth.uid())
     );
 
 CREATE POLICY "Projects insertable by authenticated users" ON projects
@@ -190,7 +190,7 @@ CREATE POLICY "Projects editable by owner_reviewer" ON projects
 -- ----------------------------------------------------------------------------
 CREATE POLICY "Memberships readable by fellow project members" ON memberships
     FOR SELECT USING (
-        project_id IN (SELECT project_id FROM memberships m WHERE m.user_id = auth.uid())
+        project_id IN (SELECT memberships.project_id FROM memberships WHERE memberships.user_id = auth.uid())
     );
 
 CREATE POLICY "Memberships manageable by project owner_reviewer" ON memberships
@@ -235,17 +235,17 @@ CREATE POLICY "Sources deletable by owner_reviewer" ON sources
 CREATE POLICY "Passages SELECT inherits source visibility" ON passages
     FOR SELECT USING (
         EXISTS (
-            SELECT 1 FROM sources s 
-            WHERE s.id = passages.source_id
+            SELECT 1 FROM sources 
+            WHERE sources.id = passages.source_id
         )
     );
 
 CREATE POLICY "Passages manageable by owner_reviewer" ON passages
     FOR ALL USING (
         EXISTS (
-            SELECT 1 FROM sources s 
-            WHERE s.id = passages.source_id 
-              AND get_user_role(s.project_id) = 'owner_reviewer'
+            SELECT 1 FROM sources 
+            WHERE sources.id = passages.source_id 
+              AND get_user_role(sources.project_id) = 'owner_reviewer'
         )
     );
 
@@ -272,17 +272,17 @@ CREATE POLICY "Claims manageable by owner_reviewer" ON claims
 CREATE POLICY "Claim evidence inherits claim visibility" ON claim_evidence
     FOR SELECT USING (
         EXISTS (
-            SELECT 1 FROM claims c 
-            WHERE c.id = claim_evidence.claim_id
+            SELECT 1 FROM claims 
+            WHERE claims.id = claim_evidence.claim_id
         )
     );
 
 CREATE POLICY "Claim evidence manageable by owner_reviewer" ON claim_evidence
     FOR ALL USING (
         EXISTS (
-            SELECT 1 FROM claims c 
-            WHERE c.id = claim_evidence.claim_id 
-              AND get_user_role(c.project_id) = 'owner_reviewer'
+            SELECT 1 FROM claims 
+            WHERE claims.id = claim_evidence.claim_id 
+              AND get_user_role(claims.project_id) = 'owner_reviewer'
         )
     );
 
@@ -292,17 +292,17 @@ CREATE POLICY "Claim evidence manageable by owner_reviewer" ON claim_evidence
 CREATE POLICY "Claim versions inherits claim visibility" ON claim_versions
     FOR SELECT USING (
         EXISTS (
-            SELECT 1 FROM claims c 
-            WHERE c.id = claim_versions.claim_id
+            SELECT 1 FROM claims 
+            WHERE claims.id = claim_versions.claim_id
         )
     );
 
 CREATE POLICY "Claim versions insertable by owner_reviewer" ON claim_versions
     FOR INSERT WITH CHECK (
         EXISTS (
-            SELECT 1 FROM claims c 
-            WHERE c.id = claim_versions.claim_id 
-              AND get_user_role(c.project_id) = 'owner_reviewer'
+            SELECT 1 FROM claims 
+            WHERE claims.id = claim_versions.claim_id 
+              AND get_user_role(claims.project_id) = 'owner_reviewer'
         )
     );
 
@@ -340,14 +340,14 @@ CREATE POLICY "Handovers manageable by owner_reviewer" ON handovers
 CREATE POLICY "Handover items SELECT policy" ON handover_items
     FOR SELECT USING (
         EXISTS (
-            SELECT 1 FROM handovers h 
-            WHERE h.id = handover_items.handover_id
+            SELECT 1 FROM handovers 
+            WHERE handovers.id = handover_items.handover_id
               AND (
-                  (get_user_role(h.project_id) = 'owner_reviewer')
+                  (get_user_role(handovers.project_id) = 'owner_reviewer')
                   OR
-                  (get_user_role(h.project_id) = 'incoming_lead' AND role_visibility IN ('team', 'leads_only') AND h.status = 'published')
+                  (get_user_role(handovers.project_id) = 'incoming_lead' AND role_visibility IN ('team', 'leads_only') AND handovers.status = 'published')
                   OR
-                  (get_user_role(h.project_id) = 'contributor' AND role_visibility = 'team' AND h.status = 'published')
+                  (get_user_role(handovers.project_id) = 'contributor' AND role_visibility = 'team' AND handovers.status = 'published')
               )
         )
     );
@@ -355,9 +355,9 @@ CREATE POLICY "Handover items SELECT policy" ON handover_items
 CREATE POLICY "Handover items manageable by owner_reviewer" ON handover_items
     FOR ALL USING (
         EXISTS (
-            SELECT 1 FROM handovers h 
-            WHERE h.id = handover_items.handover_id 
-              AND get_user_role(h.project_id) = 'owner_reviewer'
+            SELECT 1 FROM handovers 
+            WHERE handovers.id = handover_items.handover_id 
+              AND get_user_role(handovers.project_id) = 'owner_reviewer'
         )
     );
 
@@ -367,9 +367,9 @@ CREATE POLICY "Handover items manageable by owner_reviewer" ON handover_items
 CREATE POLICY "Acknowledgements readable by project members" ON acknowledgements
     FOR SELECT USING (
         EXISTS (
-            SELECT 1 FROM handovers h 
-            WHERE h.id = acknowledgements.handover_id 
-              AND get_user_role(h.project_id) IS NOT NULL
+            SELECT 1 FROM handovers 
+            WHERE handovers.id = acknowledgements.handover_id 
+              AND get_user_role(handovers.project_id) IS NOT NULL
         )
     );
 
@@ -377,9 +377,9 @@ CREATE POLICY "Acknowledgements insertable by project members" ON acknowledgemen
     FOR INSERT WITH CHECK (
         auth.uid() = user_id 
         AND EXISTS (
-            SELECT 1 FROM handovers h 
-            WHERE h.id = acknowledgements.handover_id 
-              AND h.status = 'published'
+            SELECT 1 FROM handovers 
+            WHERE handovers.id = acknowledgements.handover_id 
+              AND handovers.status = 'published'
         )
     );
 
