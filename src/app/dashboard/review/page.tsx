@@ -4,6 +4,7 @@ import React, { useState, useEffect } from "react";
 import { VerifiedClaim, VerifiedEvidence } from "@/lib/pipeline/integrity";
 import { ConflictGroup, GapItem } from "@/types/gaps";
 import { SourceViewerModal } from "@/components/sources/SourceViewerModal";
+import { VersionHistoryModal } from "@/components/review/VersionHistoryModal";
 import { 
   CheckSquare, 
   AlertTriangle, 
@@ -22,7 +23,8 @@ import {
   Check, 
   XCircle,
   Clock,
-  Sparkles
+  History,
+  RotateCcw
 } from "lucide-react";
 
 export default function ReviewWorkspacePage() {
@@ -35,7 +37,11 @@ export default function ReviewWorkspacePage() {
   // Selected claim for side-panel citation inspection
   const [selectedClaim, setSelectedClaim] = useState<VerifiedClaim | null>(null);
 
-  // Editing modal/state
+  // Version history modal state
+  const [historyClaimId, setHistoryClaimId] = useState<string | null>(null);
+  const [historyClaimText, setHistoryClaimText] = useState("");
+
+  // Editing state
   const [editingClaimId, setEditingClaimId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
 
@@ -100,7 +106,11 @@ export default function ReviewWorkspacePage() {
           setSelectedClaim(data.claim);
         }
         setEditingClaimId(null);
-        setFeedbackMsg(`Claim successfully ${action}d (Version: ${data.claim.version})`);
+        setFeedbackMsg(
+          action === "reject"
+            ? `Claim rejected and excluded from all handovers. Version v${data.claim.version} logged in audit trail.`
+            : `Claim successfully ${action}d (Version: v${data.claim.version}). Logged in audit trail.`
+        );
       }
     } catch {
       setFeedbackMsg("Failed to update claim review state.");
@@ -201,7 +211,7 @@ export default function ReviewWorkspacePage() {
             }`}
           >
             <CheckSquare className="w-3.5 h-3.5 text-indigo-600" />
-            <span>Claims & Review ({claims.length})</span>
+            <span>Claims &amp; Review ({claims.length})</span>
           </button>
 
           <button
@@ -257,6 +267,7 @@ export default function ReviewWorkspacePage() {
               const statusBadge = getStatusBadge(claim.status);
               const isSelected = selectedClaim?.id === claim.id;
               const isEditing = editingClaimId === claim.id;
+              const isPending = !claim.review_state || claim.review_state === "pending";
 
               return (
                 <div
@@ -275,7 +286,7 @@ export default function ReviewWorkspacePage() {
                         {claim.kind.replace("_", " ")}
                       </span>
                       <span
-                        className={`inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full border ${statusBadge.bg}`}
+                        className={`inline-flex items-center text-xs font-semibold px-2.5 py-0.5 rounded-full border ${statusBadge.bg}`}
                       >
                         {statusBadge.icon}
                         {statusBadge.label}
@@ -283,9 +294,21 @@ export default function ReviewWorkspacePage() {
                     </div>
 
                     <div className="flex items-center space-x-2">
-                      <span className="text-[10px] font-mono text-slate-400">
+                      {/* Version history button */}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setHistoryClaimId(claim.id!);
+                          setHistoryClaimText(claim.text);
+                        }}
+                        className="inline-flex items-center text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 transition-colors"
+                        title="View immutable version history and diff"
+                      >
+                        <History className="w-3 h-3 mr-1 text-slate-500" />
                         v{claim.version || 1}
-                      </span>
+                      </button>
+
+                      {/* Review State Badge: "Unreviewed" on AI-only claims */}
                       <span
                         className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
                           claim.review_state === "approved"
@@ -294,10 +317,10 @@ export default function ReviewWorkspacePage() {
                             ? "bg-rose-50 text-rose-700 border-rose-200"
                             : claim.review_state === "edited"
                             ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                            : "bg-slate-100 text-slate-600 border-slate-200"
+                            : "bg-amber-50 text-amber-800 border-amber-200 font-bold"
                         }`}
                       >
-                        {claim.review_state || "pending"}
+                        {isPending ? "Unreviewed (AI-Generated)" : claim.review_state}
                       </span>
                     </div>
                   </div>
@@ -322,7 +345,7 @@ export default function ReviewWorkspacePage() {
                           onClick={() => handleReviewAction(claim.id!, "edit")}
                           className="px-3 py-1 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg"
                         >
-                          Save Version
+                          Save New Version
                         </button>
                       </div>
                     </div>
@@ -332,7 +355,7 @@ export default function ReviewWorkspacePage() {
                     </p>
                   )}
 
-                  {/* Citations Preview */}
+                  {/* Citations Preview & Actions */}
                   <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
                     <span className="text-[11px] text-slate-400">
                       {claim.evidence.length} Cited Passages
@@ -348,18 +371,26 @@ export default function ReviewWorkspacePage() {
                           setEditingClaimId(claim.id!);
                           setEditingText(claim.text);
                         }}
-                        className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-slate-100"
+                        className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-slate-100 flex items-center text-xs font-medium"
                         title="Edit claim text (creates new version)"
                       >
-                        <Edit3 className="w-3.5 h-3.5" />
+                        <Edit3 className="w-3.5 h-3.5 mr-1" />
+                        Edit
                       </button>
+
                       <button
                         onClick={() => handleReviewAction(claim.id!, "reject")}
-                        className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                        title="Reject claim"
+                        className={`p-1.5 rounded-lg flex items-center text-xs font-medium transition-colors ${
+                          claim.review_state === "rejected"
+                            ? "bg-rose-100 text-rose-800 font-bold"
+                            : "text-slate-500 hover:text-rose-600 hover:bg-rose-50"
+                        }`}
+                        title="Reject claim (excluded from handover publication)"
                       >
-                        <X className="w-3.5 h-3.5" />
+                        <X className="w-3.5 h-3.5 mr-1" />
+                        {claim.review_state === "rejected" ? "Rejected" : "Reject"}
                       </button>
+
                       <button
                         onClick={() => handleReviewAction(claim.id!, "approve")}
                         className={`inline-flex items-center text-xs font-semibold px-2.5 py-1 rounded-lg transition-colors ${
@@ -637,7 +668,7 @@ export default function ReviewWorkspacePage() {
                     <div className="space-y-3 pt-2">
                       <textarea
                         rows={3}
-                        placeholder="Type your response as the departing lead (e.g. explain rationale, specify assignee, or clarify branch)..."
+                        placeholder="Type your response as the departing lead..."
                         value={answerInput[gap.id] || ""}
                         onChange={(e) =>
                           setAnswerInput((prev) => ({
@@ -670,7 +701,6 @@ export default function ReviewWorkspacePage() {
                         onClick={() => {
                           setAnsweringGapId(gap.id);
                           if (!answerInput[gap.id]) {
-                            // Seed helpful suggested answer
                             let defaultAns = "";
                             if (gap.id === "gap-db-switch") {
                               defaultAns = "We migrated to PostgreSQL on Supabase because of required ACID transactional consistency for billing records and native foreign key relations with Row Level Security.";
@@ -698,7 +728,7 @@ export default function ReviewWorkspacePage() {
         </div>
       )}
 
-      {/* Source Viewer Modal */}
+      {/* Modals */}
       <SourceViewerModal
         sourceId={viewerSourceId}
         highlightQuote={viewerQuote}
@@ -707,6 +737,15 @@ export default function ReviewWorkspacePage() {
           setViewerSourceId(null);
           setViewerQuote(undefined);
           setViewerIdx(undefined);
+        }}
+      />
+
+      <VersionHistoryModal
+        claimId={historyClaimId}
+        currentText={historyClaimText}
+        onClose={() => {
+          setHistoryClaimId(null);
+          setHistoryClaimText("");
         }}
       />
     </div>

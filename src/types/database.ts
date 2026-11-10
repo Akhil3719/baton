@@ -51,6 +51,18 @@ export interface Claim {
   updated_at: string;
 }
 
+export interface ClaimVersion {
+  id: string;
+  claim_id: string;
+  version: number;
+  text: string;
+  status: ClaimStatus;
+  review_state: ReviewState;
+  edited_by: string;
+  edited_at: string;
+  diff_summary?: string;
+}
+
 export interface ClaimEvidence {
   id: string;
   claim_id: string;

@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { Role, AccessLevel, SourceType, ClaimKind, ClaimStatus, ReviewState } from "@/types/handover";
-import { Project, Membership, Source, Passage, AuditLog } from "@/types/database";
+import { Project, Membership, Source, Passage, AuditLog, ClaimVersion } from "@/types/database";
 import { parseSourceText } from "@/lib/pipeline/chunker";
 import { VerifiedClaim, verifyClaimEvidence } from "@/lib/pipeline/integrity";
 import { CACHED_SAMPLE_CLAIMS } from "@/lib/demo/cached-run";
@@ -14,6 +14,7 @@ class BatonStore {
   private sources: Map<string, Source> = new Map();
   private passages: Map<string, Passage[]> = new Map();
   private claims: Map<string, VerifiedClaim> = new Map();
+  private claimVersions: Map<string, ClaimVersion[]> = new Map(); // claimId -> ClaimVersion[]
   private gaps: Map<string, GapItem> = new Map();
   private conflictGroups: ConflictGroup[] = [];
   private auditLogs: AuditLog[] = [];
@@ -132,16 +133,32 @@ class BatonStore {
     this.claims.clear();
     for (const c of claimsList) {
       const claimId = c.id || `claim-${Math.random().toString(36).substring(2, 8)}`;
-      this.claims.set(claimId, {
+      const savedClaim: VerifiedClaim = {
         ...c,
         id: claimId,
         review_state: (c as any).review_state || "pending",
         version: (c as any).version || 1,
-      });
+      };
+      this.claims.set(claimId, savedClaim);
+
+      // Initialize Version 1 if not exists
+      if (!this.claimVersions.has(claimId)) {
+        this.claimVersions.set(claimId, [
+          {
+            id: `ver-${claimId}-1`,
+            claim_id: claimId,
+            version: 1,
+            text: savedClaim.text,
+            status: savedClaim.status,
+            review_state: (savedClaim as any).review_state || "pending",
+            edited_by: "Gemini AI",
+            edited_at: new Date().toISOString(),
+            diff_summary: "Initial AI-generated claim extraction",
+          },
+        ]);
+      }
     }
     this.lastExtractionTime = new Date().toISOString();
-
-    // Re-run gap and conflict detectors
     this.refreshGapsAndConflicts();
   }
 
@@ -160,46 +177,86 @@ class BatonStore {
     });
   }
 
+  /**
+   * Section 5: Review and edit claims with version history.
+   * Rejected claims are excluded from handovers.
+   */
   public updateClaimReview(
     claimId: string,
     action: "approve" | "reject" | "edit",
     actor: string,
     editedText?: string
-  ): { claim: VerifiedClaim | null; error?: string } {
+  ): { claim: VerifiedClaim | null; versionRow?: ClaimVersion; error?: string } {
     const claim = this.claims.get(claimId);
     if (!claim) return { claim: null, error: "Claim not found" };
 
-    const previousVersion = (claim as any).version || 1;
+    const previousVersion = claim.version || 1;
+    const previousText = claim.text;
+    const newVersionNum = previousVersion + 1;
     let newReviewState: ReviewState = "pending";
+    let diffSummary = "";
 
     if (action === "approve") {
       newReviewState = "approved";
+      diffSummary = "Approved by human reviewer";
     } else if (action === "reject") {
       newReviewState = "rejected";
+      diffSummary = "Rejected by reviewer: excluded from handover publication";
     } else if (action === "edit") {
       newReviewState = "edited";
       if (editedText && editedText.trim()) {
         claim.text = editedText.trim();
+        diffSummary = `Modified statement text (previous: "${previousText.slice(0, 30)}...")`;
+      } else {
+        diffSummary = "Edited claim statement";
       }
     }
 
     const updatedClaim: VerifiedClaim = {
       ...claim,
       review_state: newReviewState,
-      version: previousVersion + 1,
-    } as any;
+      version: newVersionNum,
+    };
 
     this.claims.set(claimId, updatedClaim);
 
+    // Create new claim_versions row
+    const versionRow: ClaimVersion = {
+      id: `ver-${claimId}-${newVersionNum}`,
+      claim_id: claimId,
+      version: newVersionNum,
+      text: updatedClaim.text,
+      status: updatedClaim.status,
+      review_state: newReviewState,
+      edited_by: actor,
+      edited_at: new Date().toISOString(),
+      diff_summary: diffSummary,
+    };
+
+    const existingVersions = this.claimVersions.get(claimId) || [];
+    this.claimVersions.set(claimId, [versionRow, ...existingVersions]);
+
+    // Record in audit_log
     this.addAuditLog(
       "nexus-tech-club",
       actor,
       `CLAIM_${action.toUpperCase()}`,
-      updatedClaim.text.slice(0, 50),
-      { claimId, action, version: updatedClaim.version, newStatus: updatedClaim.status }
+      updatedClaim.text.slice(0, 60),
+      {
+        claimId,
+        action,
+        version: newVersionNum,
+        previousVersion,
+        newReviewState,
+        diffSummary,
+      }
     );
 
-    return { claim: updatedClaim };
+    return { claim: updatedClaim, versionRow };
+  }
+
+  public getClaimVersions(claimId: string): ClaimVersion[] {
+    return this.claimVersions.get(claimId) || [];
   }
 
   public refreshGapsAndConflicts() {
@@ -230,12 +287,6 @@ class BatonStore {
     return this.conflictGroups;
   }
 
-  /**
-   * Section 5F: Answer a gap question as reviewer.
-   * Creates a 'leaver_response' source with access level 'leads_only',
-   * attaches as evidence with a 'Stated by leaver' badge,
-   * updates claim to 'inferred' (stays inferred until approved).
-   */
   public answerGapQuestion(
     gapId: string,
     answerText: string,
@@ -244,24 +295,21 @@ class BatonStore {
     const gap = this.gaps.get(gapId);
     if (!gap) return { gap: null, source: null, updatedClaim: null, error: "Gap not found" };
 
-    // 1. Create leaver_response source with access_level: leads_only
     const sourceTitle = `Leaver Response: ${gap.title}`;
     const { source, passages } = this.addSource(
       "nexus-tech-club",
       sourceTitle,
       "notes",
       answerText,
-      "leads_only", // access level leads
+      "leads_only",
       answeredBy
     );
 
-    // 2. Update gap record
     gap.answer = answerText;
     gap.answered_by = answeredBy;
     gap.answered_at = new Date().toISOString();
     this.gaps.set(gapId, gap);
 
-    // 3. Attach as evidence with "Stated by leaver" badge to associated claim
     let updatedClaim: VerifiedClaim | null = null;
     if (gap.associated_claim_id && this.claims.has(gap.associated_claim_id)) {
       const claim = this.claims.get(gap.associated_claim_id)!;
@@ -270,23 +318,41 @@ class BatonStore {
         source_id: source.id,
         locator: `Leaver Statement (line 1)`,
         exact_quote: answerText,
-        verified: true, // verbatim match against created leaver source
+        verified: true,
         resolved_source_id: source.id,
         source_title: sourceTitle,
         passage_idx: passages[0]?.idx || 1,
-        is_leaver_statement: true, // "Stated by leaver" badge
+        is_leaver_statement: true,
       };
 
-      // Claim stays Inferred until approved
+      const newVersionNum = (claim.version || 1) + 1;
+
       updatedClaim = {
         ...claim,
-        status: "inferred", // stays Inferred until approved
+        status: "inferred",
+        version: newVersionNum,
         evidence: [leaverEvidence, ...claim.evidence],
-        gap_details: undefined, // resolved gap note
-        audit_note: `Answered by leaver (${answeredBy}). Marked Inferred pending review approval.`,
+        gap_details: undefined,
+        audit_note: `Answered by leaver (${answeredBy}). Stated by leaver badge attached. Marked Inferred pending approval.`,
       };
 
       this.claims.set(claim.id!, updatedClaim);
+
+      // Record version row
+      const versionRow: ClaimVersion = {
+        id: `ver-${claim.id}-${newVersionNum}`,
+        claim_id: claim.id!,
+        version: newVersionNum,
+        text: updatedClaim.text,
+        status: "inferred",
+        review_state: (claim as any).review_state || "pending",
+        edited_by: answeredBy,
+        edited_at: new Date().toISOString(),
+        diff_summary: "Leaver answered gap question. Attached 'Stated by leaver' evidence.",
+      };
+
+      const existingVersions = this.claimVersions.get(claim.id!) || [];
+      this.claimVersions.set(claim.id!, [versionRow, ...existingVersions]);
     }
 
     this.addAuditLog(
@@ -357,6 +423,7 @@ class BatonStore {
     this.sources.clear();
     this.passages.clear();
     this.claims.clear();
+    this.claimVersions.clear();
     this.gaps.clear();
     this.conflictGroups = [];
     this.auditLogs = [];

@@ -85,6 +85,19 @@ CREATE TABLE IF NOT EXISTS claim_evidence (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- 7b. Claim Versions (Immutable history of edits and reviews)
+CREATE TABLE IF NOT EXISTS claim_versions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    claim_id UUID NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL,
+    review_state TEXT NOT NULL,
+    edited_by TEXT NOT NULL,
+    edited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    diff_summary TEXT
+);
+
 -- 8. Gap Questions
 CREATE TABLE IF NOT EXISTS gap_questions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -149,6 +162,7 @@ ALTER TABLE sources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE passages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE claims ENABLE ROW LEVEL SECURITY;
 ALTER TABLE claim_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE claim_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE gap_questions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE handovers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE handover_items ENABLE ROW LEVEL SECURITY;
@@ -268,6 +282,26 @@ CREATE POLICY "Claim evidence manageable by owner_reviewer" ON claim_evidence
         EXISTS (
             SELECT 1 FROM claims c 
             WHERE c.id = claim_evidence.claim_id 
+              AND get_user_role(c.project_id) = 'owner_reviewer'
+        )
+    );
+
+-- ----------------------------------------------------------------------------
+-- Claim Versions RLS
+-- ----------------------------------------------------------------------------
+CREATE POLICY "Claim versions inherits claim visibility" ON claim_versions
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM claims c 
+            WHERE c.id = claim_versions.claim_id
+        )
+    );
+
+CREATE POLICY "Claim versions insertable by owner_reviewer" ON claim_versions
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM claims c 
+            WHERE c.id = claim_versions.claim_id 
               AND get_user_role(c.project_id) = 'owner_reviewer'
         )
     );
